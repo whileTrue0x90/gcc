@@ -598,8 +598,8 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
 					    gimple_cond_rhs (outer_cond),
 					    gimple_bb (outer_cond))))
 	{
+	  {
 	  tree t1, t2;
-	  gimple_stmt_iterator gsi;
 	  bool logical_op_non_short_circuit = LOGICAL_OP_NON_SHORT_CIRCUIT;
 	  if (param_logical_op_non_short_circuit != -1)
 	    logical_op_non_short_circuit
@@ -621,6 +621,8 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
 				gimple_cond_rhs (outer_cond));
 	  t = fold_build2_loc (gimple_location (inner_cond), 
 			       TRUTH_AND_EXPR, boolean_type_node, t1, t2);
+	  }
+	gimplify_after_fold:
 	  if (result_inv)
 	    {
 	      t = fold_build1 (TRUTH_NOT_EXPR, TREE_TYPE (t), t);
@@ -630,6 +632,9 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
 	  t = force_gimple_operand_gsi_1 (&gsi, t, is_gimple_condexpr_for_cond,
 					  NULL, true, GSI_SAME_STMT);
         }
+      /* ??? Fold should avoid this.  */
+      else if (!is_gimple_condexpr_for_cond (t))
+	goto gimplify_after_fold;
       if (result_inv)
 	t = fold_build1 (TRUTH_NOT_EXPR, TREE_TYPE (t), t);
       t = canonicalize_cond_expr_cond (t);
