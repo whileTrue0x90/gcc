@@ -32,23 +32,21 @@ struct TL vL = { vc, vi, vc, vi, vc, vi, vc };
 struct TB vB = { vc, vi, vc, vi, vc, vi, vc };
 
 void f (void) {
-  /* Which words of    | vL | vB | */
-  /* are accessed by   |0123|0123| */
-  if (0 /* the tests?  |    |    | */
-      || vL.p != vc /* |*   |    | */
-      || vB.p != vc /* |    |*   | */
-      || vL.s != vc /* |   *|    | */
-      || vB.q != vc /* |    | *  | */
-      || vL.a != vi /* |^*  |    | */
-      || vB.b != vi /* |    | ^* | */
-      || vL.c != vi /* |  *^|    | */
-      || vB.c != vi /* |    |  ^*| */
-      || vL.b != vi /* | ^^ |    | */
-      || vL.q != vc /* | ^  |    | */
-      || vB.a != vi /* |    |^^  | */
-      || vB.r != vc /* |    |  ^ | */
-      || vB.s != vc /* |    |   ^| */
-      || vL.r != vc /* |  ^ |    | */
+  if (0
+      || vL.p != vc
+      || vL.a != vi
+      || vL.q != vc
+      || vL.b != vi
+      || vL.r != vc
+      || vL.c != vi
+      || vL.s != vc
+      || vB.p != vc
+      || vB.a != vi
+      || vB.q != vc
+      || vB.b != vi
+      || vB.r != vc
+      || vB.c != vi
+      || vB.s != vc
       )
     __builtin_abort ();
 }
