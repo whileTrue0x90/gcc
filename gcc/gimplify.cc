@@ -242,6 +242,7 @@ static struct gimplify_omp_ctx *gimplify_omp_ctxp;
 static bool in_omp_construct;
 
 /* Forward declaration.  */
+static void gimplify_type_sizes (tree type, gimple_seq *list_p);
 static enum gimplify_status gimplify_compound_expr (tree *, gimple_seq *, bool);
 static hash_map<tree, tree> *oacc_declare_returns;
 static enum gimplify_status gimplify_expr (tree *, gimple_seq *, gimple_seq *,
@@ -17467,7 +17468,7 @@ gimplify_expr (tree *expr_p, gimple_seq *pre_p, gimple_seq *post_p,
 /* Look through TYPE for variable-sized objects and gimplify each such
    size that we find.  Add to LIST_P any statements generated.  */
 
-void
+static void
 gimplify_type_sizes (tree type, gimple_seq *list_p)
 {
   if (type == NULL || type == error_mark_node)
@@ -17574,6 +17575,21 @@ gimplify_type_sizes (tree type, gimple_seq *list_p)
       TYPE_SIZES_GIMPLIFIED (t) = 1;
     }
 }
+
+/* Gimplify sizes in parameter declarations.  */
+
+void
+gimplify_parm_sizes (tree parm, gimple_seq *list_p)
+{
+  gimplify_type_sizes (TREE_TYPE (parm), list_p);
+
+  if (TREE_CODE (DECL_SIZE_UNIT (parm)) != INTEGER_CST)
+    {
+      gimplify_one_sizepos (&DECL_SIZE (parm), list_p);
+      gimplify_one_sizepos (&DECL_SIZE_UNIT (parm), list_p);
+    }
+}
+
 
 /* A subroutine of gimplify_type_sizes to make sure that *EXPR_P,
    a size or position, has had all of its SAVE_EXPRs evaluated.
