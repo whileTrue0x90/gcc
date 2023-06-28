@@ -501,7 +501,7 @@ scale_loop_frequencies (class loop *loop, profile_probability p)
 /* Scale profile in LOOP by P.
    If ITERATION_BOUND is non-zero, scale even further if loop is predicted
    to iterate too many times.
-   Before caling this function, preheader block profile should be already
+   Before calling this function, preheader block profile should be already
    scaled to final count.  This is necessary because loop iterations are
    determined by comparing header edge count to latch ege count and thus
    they need to be scaled synchronously.  */
@@ -597,14 +597,14 @@ scale_loop_profile (class loop *loop, profile_probability p,
       /* If latch exists, change its count, since we changed
 	 probability of exit.  Theoretically we should update everything from
 	 source of exit edge to latch, but for vectorizer this is enough.  */
-      if (loop->latch && loop->latch != e->src)
+      if (e && loop->latch && loop->latch != e->src)
 	loop->latch->count += count_delta;
 
       /* Scale the probabilities.  */
       scale_loop_frequencies (loop, p);
 
       /* Change latch's count back.  */
-      if (loop->latch && loop->latch != e->src)
+      if (e && loop->latch && loop->latch != e->src)
 	loop->latch->count -= count_delta;
 
       if (dump_file && (dump_flags & TDF_DETAILS))
