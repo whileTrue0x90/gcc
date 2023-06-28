@@ -876,6 +876,12 @@ public:
      we need to peel off iterations at the end to form an epilogue loop.  */
   bool peeling_for_niter;
 
+  /* List of loop additional IV conditionals found in the loop.  */
+  auto_vec<gcond *> conds;
+
+  /* Main loop IV cond.  */
+  gcond* loop_iv_cond;
+
   /* True if there are no loop carried data dependencies in the loop.
      If loop->safelen <= 1, then this is always true, either the loop
      didn't have any loop carried data dependencies, or the loop is being
@@ -966,6 +972,8 @@ public:
 #define LOOP_VINFO_REDUCTION_CHAINS(L)     (L)->reduction_chains
 #define LOOP_VINFO_PEELING_FOR_GAPS(L)     (L)->peeling_for_gaps
 #define LOOP_VINFO_PEELING_FOR_NITER(L)    (L)->peeling_for_niter
+#define LOOP_VINFO_LOOP_CONDS(L)           (L)->conds
+#define LOOP_VINFO_LOOP_IV_COND(L)         (L)->loop_iv_cond
 #define LOOP_VINFO_NO_DATA_DEPENDENCIES(L) (L)->no_data_dependencies
 #define LOOP_VINFO_SCALAR_LOOP(L)	   (L)->scalar_loop
 #define LOOP_VINFO_SCALAR_LOOP_SCALING(L)  (L)->scalar_loop_scaling
@@ -2353,7 +2361,9 @@ struct vect_loop_form_info
   tree number_of_iterations;
   tree number_of_iterationsm1;
   tree assumptions;
+  vec<gcond *> conds;
   gcond *loop_cond;
+  vec<gcond *> alt_loop_conds;
   gcond *inner_loop_cond;
 };
 extern opt_result vect_analyze_loop_form (class loop *, vect_loop_form_info *);
