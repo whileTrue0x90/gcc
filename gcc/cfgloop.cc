@@ -355,6 +355,7 @@ alloc_loop (void)
   loop->nb_iterations_upper_bound = 0;
   loop->nb_iterations_likely_upper_bound = 0;
   loop->nb_iterations_estimate = 0;
+  loop->vec_loop_iv = NULL;
   return loop;
 }
 

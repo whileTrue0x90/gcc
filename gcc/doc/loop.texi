@@ -212,6 +212,7 @@ relation, and breath-first search order, respectively.
 @code{NULL} if the loop has more than one exit.  You can only use this
 function if @code{LOOPS_HAVE_RECORDED_EXITS} is used.
 @item @code{get_loop_exit_edges}: Enumerates the exit edges of a loop.
+@item @code{get_edge_condition}: Get the condition belonging to an exit edge.
 @item @code{just_once_each_iteration_p}: Returns true if the basic block
 is executed exactly once during each iteration of a loop (that is, it
 does not belong to a sub-loop, and it dominates the latch of the loop).

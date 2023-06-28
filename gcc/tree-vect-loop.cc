@@ -1641,6 +1641,13 @@ vect_analyze_loop_form (class loop *loop, vect_loop_form_info *info)
 {
   DUMP_VECT_SCOPE ("vect_analyze_loop_form");
 
+  vec_init_exit_info (loop);
+  if (!loop->vec_loop_iv)
+    return opt_result::failure_at (vect_location,
+				   "not vectorized:"
+				   " could not determine main exit from"
+				   " loop with multiple exits.\n");
+
   /* Different restrictions apply when we are considering an inner-most loop,
      vs. an outer (nested) loop.
      (FORNOW. May want to relax some of these restrictions in the future).  */
@@ -3025,9 +3032,8 @@ start_over:
       if (dump_enabled_p ())
         dump_printf_loc (MSG_NOTE, vect_location, "epilog loop required\n");
       if (!vect_can_advance_ivs_p (loop_vinfo)
-	  || !slpeel_can_duplicate_loop_p (LOOP_VINFO_LOOP (loop_vinfo),
-					   single_exit (LOOP_VINFO_LOOP
-							 (loop_vinfo))))
+	  || !slpeel_can_duplicate_loop_p (loop_vinfo,
+					   LOOP_VINFO_IV_EXIT (loop_vinfo)))
         {
 	  ok = opt_result::failure_at (vect_location,
 				       "not vectorized: can't create required "
@@ -5964,7 +5970,7 @@ vect_create_epilog_for_reduction (loop_vec_info loop_vinfo,
          Store them in NEW_PHIS.  */
   if (double_reduc)
     loop = outer_loop;
-  exit_bb = single_exit (loop)->dest;
+  exit_bb = LOOP_VINFO_IV_EXIT (loop_vinfo)->dest;
   exit_gsi = gsi_after_labels (exit_bb);
   reduc_inputs.create (slp_node ? vec_num : ncopies);
   for (unsigned i = 0; i < vec_num; i++)
@@ -5980,7 +5986,7 @@ vect_create_epilog_for_reduction (loop_vec_info loop_vinfo,
 	  phi = create_phi_node (new_def, exit_bb);
 	  if (j)
 	    def = gimple_get_lhs (STMT_VINFO_VEC_STMTS (rdef_info)[j]);
-	  SET_PHI_ARG_DEF (phi, single_exit (loop)->dest_idx, def);
+	  SET_PHI_ARG_DEF (phi, LOOP_VINFO_IV_EXIT (loop_vinfo)->dest_idx, def);
 	  new_def = gimple_convert (&stmts, vectype, new_def);
 	  reduc_inputs.quick_push (new_def);
 	}
@@ -10301,12 +10307,12 @@ vectorizable_live_operation (vec_info *vinfo,
 	   lhs' = new_tree;  */
 
       class loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
-      basic_block exit_bb = single_exit (loop)->dest;
+      basic_block exit_bb = LOOP_VINFO_IV_EXIT (loop_vinfo)->dest;
       gcc_assert (single_pred_p (exit_bb));
 
       tree vec_lhs_phi = copy_ssa_name (vec_lhs);
       gimple *phi = create_phi_node (vec_lhs_phi, exit_bb);
-      SET_PHI_ARG_DEF (phi, single_exit (loop)->dest_idx, vec_lhs);
+      SET_PHI_ARG_DEF (phi, LOOP_VINFO_IV_EXIT (loop_vinfo)->dest_idx, vec_lhs);
 
       gimple_seq stmts = NULL;
       tree new_tree;
@@ -10829,7 +10835,8 @@ scale_profile_for_vect_loop (class loop *loop, unsigned vf)
       scale_loop_frequencies (loop, p);
     }
 
-  edge exit_e = single_exit (loop);
+  edge exit_e = loop->vec_loop_iv;
+
   exit_e->probability = profile_probability::always () / (new_est_niter + 1);
 
   edge exit_l = single_pred_edge (loop->latch);
@@ -11177,7 +11184,7 @@ vect_transform_loop (loop_vec_info loop_vinfo, gimple *loop_vectorized_call)
 
   /* Make sure there exists a single-predecessor exit bb.  Do this before 
      versioning.   */
-  edge e = single_exit (loop);
+  edge e = LOOP_VINFO_IV_EXIT (loop_vinfo);
   if (! single_pred_p (e->dest))
     {
       split_loop_exit_edge (e, true);

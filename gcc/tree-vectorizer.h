@@ -917,6 +917,8 @@ public:
 
 /* Access Functions.  */
 #define LOOP_VINFO_LOOP(L)                 (L)->loop
+#define LOOP_VINFO_IV_EXIT(L)              (L)->loop->vec_loop_iv
+#define LOOP_VINFO_ALT_EXITS(L)            (L)->loop->vec_loop_alt_exits
 #define LOOP_VINFO_BBS(L)                  (L)->bbs
 #define LOOP_VINFO_NITERSM1(L)             (L)->num_itersm1
 #define LOOP_VINFO_NITERS(L)               (L)->num_iters
@@ -2162,6 +2164,7 @@ extern void vect_prepare_for_masked_peels (loop_vec_info);
 extern dump_user_location_t find_loop_location (class loop *);
 extern bool vect_can_advance_ivs_p (loop_vec_info);
 extern void vect_update_inits_of_drs (loop_vec_info, tree, tree_code);
+extern void vec_init_exit_info (class loop *);
 
 /* In tree-vect-stmts.cc.  */
 extern tree get_related_vectype_for_scalar_type (machine_mode, tree,

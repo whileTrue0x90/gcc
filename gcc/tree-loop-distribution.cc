@@ -3042,6 +3042,24 @@ loop_distribution::distribute_loop (class loop *loop,
       return 0;
     }
 
+  /* Loop distribution only does prologue peeling but we still need to
+     initialize loop exit information.  However we only support single exits at
+     the moment.  As such, should exit information not have been provided and we
+     have more than one exit, bail out.  */
+  if (!(loop->vec_loop_iv = single_exit (loop)))
+    {
+      if (dump_file && (dump_flags & TDF_DETAILS))
+	fprintf (dump_file,
+		 "Loop %d not distributed: too many exits.\n",
+		 loop->num);
+
+      free_rdg (rdg);
+      loop_nest.release ();
+      free_data_refs (datarefs_vec);
+      delete ddrs_table;
+      return 0;
+    }
+
   data_reference_p dref;
   for (i = 0; datarefs_vec.iterate (i, &dref); ++i)
     dref->aux = (void *) (uintptr_t) i;

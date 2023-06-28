@@ -272,6 +272,14 @@ public:
      the basic-block from being collected but its index can still be
      reused.  */
   basic_block former_header;
+
+  /* The controlling loop IV for the current loop when vectorizing.  This IV
+     controls the natural exits of the loop.  */
+  edge  GTY ((skip (""))) vec_loop_iv;
+
+  /* If the loop has multiple exits this structure contains the alternate
+     exits of the loop which are relevant for vectorization.  */
+  vec<edge> GTY ((skip (""))) vec_loop_alt_exits;
 };
 
 /* Set if the loop is known to be infinite.  */

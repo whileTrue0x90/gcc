@@ -904,7 +904,7 @@ vect_set_loop_condition_partial_vectors (class loop *loop,
   add_header_seq (loop, header_seq);
 
   /* Get a boolean result that tells us whether to iterate.  */
-  edge exit_edge = single_exit (loop);
+  edge exit_edge = LOOP_VINFO_IV_EXIT (loop_vinfo);
   gcond *cond_stmt;
   if (LOOP_VINFO_USING_DECREMENTING_IV_P (loop_vinfo)
       && !LOOP_VINFO_USING_SELECT_VL_P (loop_vinfo))
@@ -935,7 +935,7 @@ vect_set_loop_condition_partial_vectors (class loop *loop,
   if (final_iv)
     {
       gassign *assign = gimple_build_assign (final_iv, orig_niters);
-      gsi_insert_on_edge_immediate (single_exit (loop), assign);
+      gsi_insert_on_edge_immediate (exit_edge, assign);
     }
 
   return cond_stmt;
@@ -1183,7 +1183,8 @@ vect_set_loop_condition_partial_vectors_avx512 (class loop *loop,
    loop handles exactly VF scalars per iteration.  */
 
 static gcond *
-vect_set_loop_condition_normal (class loop *loop, tree niters, tree step,
+vect_set_loop_condition_normal (loop_vec_info loop_vinfo,
+				class loop *loop, tree niters, tree step,
 				tree final_iv, bool niters_maybe_zero,
 				gimple_stmt_iterator loop_cond_gsi)
 {
@@ -1191,13 +1192,13 @@ vect_set_loop_condition_normal (class loop *loop, tree niters, tree step,
   gcond *cond_stmt;
   gcond *orig_cond;
   edge pe = loop_preheader_edge (loop);
-  edge exit_edge = single_exit (loop);
+  edge exit_edge = loop->vec_loop_iv;
   gimple_stmt_iterator incr_gsi;
   bool insert_after;
   enum tree_code code;
   tree niters_type = TREE_TYPE (niters);
 
-  orig_cond = get_loop_exit_condition (loop);
+  orig_cond = get_edge_condition (exit_edge);
   gcc_assert (orig_cond);
   loop_cond_gsi = gsi_for_stmt (orig_cond);
 
@@ -1305,7 +1306,7 @@ vect_set_loop_condition_normal (class loop *loop, tree niters, tree step,
   if (final_iv)
     {
       gassign *assign;
-      edge exit = single_exit (loop);
+      edge exit = LOOP_VINFO_IV_EXIT (loop_vinfo);
       gcc_assert (single_pred_p (exit->dest));
       tree phi_dest
 	= integer_zerop (init) ? final_iv : copy_ssa_name (indx_after_incr);
@@ -1353,7 +1354,7 @@ vect_set_loop_condition (class loop *loop, loop_vec_info loop_vinfo,
 			 bool niters_maybe_zero)
 {
   gcond *cond_stmt;
-  gcond *orig_cond = get_loop_exit_condition (loop);
+  gcond *orig_cond = get_edge_condition (loop->vec_loop_iv);
   gimple_stmt_iterator loop_cond_gsi = gsi_for_stmt (orig_cond);
 
   if (loop_vinfo && LOOP_VINFO_USING_PARTIAL_VECTORS_P (loop_vinfo))
@@ -1370,7 +1371,8 @@ vect_set_loop_condition (class loop *loop, loop_vec_info loop_vinfo,
 							     loop_cond_gsi);
     }
   else
-    cond_stmt = vect_set_loop_condition_normal (loop, niters, step, final_iv,
+    cond_stmt = vect_set_loop_condition_normal (loop_vinfo, loop, niters,
+						step, final_iv,
 						niters_maybe_zero,
 						loop_cond_gsi);
 
@@ -1439,6 +1441,69 @@ slpeel_duplicate_current_defs_from_edges (edge from, edge to)
 		     get_current_def (PHI_ARG_DEF_FROM_EDGE (from_phi, from)));
 }
 
+/* When copies of the same loop are created the copies won't have any SCEV
+   information and so we can't determine what their exits are.  However since
+   they are copies of an original loop the exits should be the same.
+
+   I don't really like this, and think we need a different way, but I don't
+   know what.  So sending this up so Richi can comment.  */
+
+void
+vec_init_exit_info (class loop *loop)
+{
+  if (loop->vec_loop_iv)
+    return;
+
+  auto_vec<edge> exits = get_loop_exit_edges (loop);
+  if (exits.is_empty ())
+    return;
+
+  if ((loop->vec_loop_iv = single_exit (loop)))
+    return;
+
+  loop->vec_loop_alt_exits.create (exits.length () - 1);
+
+  /* The main IV is to be determined by the block that's the first reachable
+     block from the latch.  We cannot rely on the order the loop analysis
+     returns and we don't have any SCEV analysis on the loop.  */
+  auto_vec <edge> workset;
+  workset.safe_push (loop_latch_edge (loop));
+  hash_set <edge> visited;
+
+  while (!workset.is_empty ())
+    {
+      edge e = workset.pop ();
+      if (visited.contains (e))
+	continue;
+
+      bool found_p = false;
+      for (edge ex : e->src->succs)
+	{
+	  if (exits.contains (ex))
+	    {
+	      found_p = true;
+	      e = ex;
+	      break;
+	    }
+	}
+
+      if (found_p)
+	{
+	  loop->vec_loop_iv = e;
+	  for (edge ex : exits)
+	    if (e != ex)
+	      loop->vec_loop_alt_exits.safe_push (ex);
+	  return;
+	}
+      else
+	{
+	  for (edge ex : e->src->preds)
+	    workset.safe_insert (0, ex);
+	}
+      visited.add (e);
+    }
+  gcc_unreachable ();
+}
 
 /* Given LOOP this function generates a new copy of it and puts it
    on E which is either the entry or exit of LOOP.  If SCALAR_LOOP is
@@ -1458,13 +1523,15 @@ slpeel_tree_duplicate_loop_to_edge_cfg (class loop *loop,
   edge exit, new_exit;
   bool duplicate_outer_loop = false;
 
-  exit = single_exit (loop);
+  exit = loop->vec_loop_iv;
   at_exit = (e == exit);
   if (!at_exit && e != loop_preheader_edge (loop))
     return NULL;
 
   if (scalar_loop == NULL)
     scalar_loop = loop;
+  else
+    vec_init_exit_info (scalar_loop);
 
   bbs = XNEWVEC (basic_block, scalar_loop->num_nodes + 1);
   pbbs = bbs + 1;
@@ -1490,12 +1557,16 @@ slpeel_tree_duplicate_loop_to_edge_cfg (class loop *loop,
   bbs[0] = preheader;
   new_bbs = XNEWVEC (basic_block, scalar_loop->num_nodes + 1);
 
-  exit = single_exit (scalar_loop);
+  exit = scalar_loop->vec_loop_iv;
   copy_bbs (bbs, scalar_loop->num_nodes + 1, new_bbs,
 	    &exit, 1, &new_exit, NULL,
 	    at_exit ? loop->latch : e->src, true);
-  exit = single_exit (loop);
+  exit = loop->vec_loop_iv;
   basic_block new_preheader = new_bbs[0];
+
+  /* Record the new loop exit information.  new_loop doesn't have SCEV data and
+     so we must initialize the exit information.  */
+  vec_init_exit_info (new_loop);
 
   /* Before installing PHI arguments make sure that the edges
      into them match that of the scalar loop we analyzed.  This
@@ -1537,7 +1608,7 @@ slpeel_tree_duplicate_loop_to_edge_cfg (class loop *loop,
 	 but LOOP will not.  slpeel_update_phi_nodes_for_guard{1,2} expects
 	 the LOOP SSA_NAMEs (on the exit edge and edge from latch to
 	 header) to have current_def set, so copy them over.  */
-      slpeel_duplicate_current_defs_from_edges (single_exit (scalar_loop),
+      slpeel_duplicate_current_defs_from_edges (scalar_loop->vec_loop_iv,
 						exit);
       slpeel_duplicate_current_defs_from_edges (EDGE_SUCC (scalar_loop->latch,
 							   0),
@@ -1696,11 +1767,12 @@ slpeel_add_loop_guard (basic_block guard_bb, tree cond,
  */
 
 bool
-slpeel_can_duplicate_loop_p (const class loop *loop, const_edge e)
+slpeel_can_duplicate_loop_p (const loop_vec_info loop_vinfo, const_edge e)
 {
-  edge exit_e = single_exit (loop);
+  class loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
+  edge exit_e = LOOP_VINFO_IV_EXIT (loop_vinfo);
   edge entry_e = loop_preheader_edge (loop);
-  gcond *orig_cond = get_loop_exit_condition (loop);
+  gcond *orig_cond = get_edge_condition (exit_e);
   gimple_stmt_iterator loop_exit_gsi = gsi_last_bb (exit_e->src);
   unsigned int num_bb = loop->inner? 5 : 2;
 
@@ -1709,7 +1781,7 @@ slpeel_can_duplicate_loop_p (const class loop *loop, const_edge e)
   if (!loop_outer (loop)
       || loop->num_nodes != num_bb
       || !empty_block_p (loop->latch)
-      || !single_exit (loop)
+      || !LOOP_VINFO_IV_EXIT (loop_vinfo)
       /* Verify that new loop exit condition can be trivially modified.  */
       || (!orig_cond || orig_cond != gsi_stmt (loop_exit_gsi))
       || (e != exit_e && e != entry_e))
@@ -1722,7 +1794,7 @@ slpeel_can_duplicate_loop_p (const class loop *loop, const_edge e)
   return ret;
 }
 
-/* Function vect_get_loop_location.
+/* Function find_loop_location.
 
    Extract the location of the loop in the source code.
    If the loop is not well formed for vectorization, an estimated
@@ -1739,11 +1811,19 @@ find_loop_location (class loop *loop)
   if (!loop)
     return dump_user_location_t ();
 
-  stmt = get_loop_exit_condition (loop);
+  if (loops_state_satisfies_p (LOOPS_HAVE_RECORDED_EXITS))
+    {
+      /* We only care about the loop location, so use any exit with location
+	 information.  */
+      for (edge e : get_loop_exit_edges (loop))
+	{
+	  stmt = get_edge_condition (e);
 
-  if (stmt
-      && LOCATION_LOCUS (gimple_location (stmt)) > BUILTINS_LOCATION)
-    return stmt;
+	  if (stmt
+	      && LOCATION_LOCUS (gimple_location (stmt)) > BUILTINS_LOCATION)
+	    return stmt;
+	}
+    }
 
   /* If we got here the loop is probably not "well formed",
      try to estimate the loop location */
@@ -1962,7 +2042,8 @@ vect_update_ivs_after_vectorizer (loop_vec_info loop_vinfo,
   gphi_iterator gsi, gsi1;
   class loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
   basic_block update_bb = update_e->dest;
-  basic_block exit_bb = single_exit (loop)->dest;
+
+  basic_block exit_bb = LOOP_VINFO_IV_EXIT (loop_vinfo)->dest;
 
   /* Make sure there exists a single-predecessor exit bb:  */
   gcc_assert (single_pred_p (exit_bb));
@@ -2529,10 +2610,9 @@ vect_gen_vector_loop_niters_mult_vf (loop_vec_info loop_vinfo,
 {
   /* We should be using a step_vector of VF if VF is variable.  */
   int vf = LOOP_VINFO_VECT_FACTOR (loop_vinfo).to_constant ();
-  class loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
   tree type = TREE_TYPE (niters_vector);
   tree log_vf = build_int_cst (type, exact_log2 (vf));
-  basic_block exit_bb = single_exit (loop)->dest;
+  basic_block exit_bb = LOOP_VINFO_IV_EXIT (loop_vinfo)->dest;
 
   gcc_assert (niters_vector_mult_vf_ptr != NULL);
   tree niters_vector_mult_vf = fold_build2 (LSHIFT_EXPR, type,
@@ -2559,7 +2639,7 @@ find_guard_arg (class loop *loop, class loop *epilog ATTRIBUTE_UNUSED,
 		gphi *lcssa_phi)
 {
   gphi_iterator gsi;
-  edge e = single_exit (loop);
+  edge e = loop->vec_loop_iv;
 
   gcc_assert (single_pred_p (e->dest));
   for (gsi = gsi_start_phis (e->dest); !gsi_end_p (gsi); gsi_next (&gsi))
@@ -3328,8 +3408,8 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 
   if (epilog_peeling)
     {
-      e = single_exit (loop);
-      gcc_checking_assert (slpeel_can_duplicate_loop_p (loop, e));
+      e = LOOP_VINFO_IV_EXIT (loop_vinfo);
+      gcc_checking_assert (slpeel_can_duplicate_loop_p (loop_vinfo, e));
 
       /* Peel epilog and put it on exit edge of loop.  If we are vectorizing
 	 said epilog then we should use a copy of the main loop as a starting
@@ -3419,8 +3499,8 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 	{
 	  guard_cond = fold_build2 (EQ_EXPR, boolean_type_node,
 				    niters, niters_vector_mult_vf);
-	  guard_bb = single_exit (loop)->dest;
-	  guard_to = split_edge (single_exit (epilog));
+	  guard_bb = LOOP_VINFO_IV_EXIT (loop_vinfo)->dest;
+	  guard_to = split_edge (epilog->vec_loop_iv);
 	  guard_e = slpeel_add_loop_guard (guard_bb, guard_cond, guard_to,
 					   skip_vector ? anchor : guard_bb,
 					   prob_epilog.invert (),
@@ -3428,7 +3508,7 @@ vect_do_peeling (loop_vec_info loop_vinfo, tree niters, tree nitersm1,
 	  if (vect_epilogues)
 	    epilogue_vinfo->skip_this_loop_edge = guard_e;
 	  slpeel_update_phi_nodes_for_guard2 (loop, epilog, guard_e,
-					      single_exit (epilog));
+					      epilog->vec_loop_iv);
 	  /* Only need to handle basic block before epilog loop if it's not
 	     the guard_bb, which is the case when skip_vector is true.  */
 	  if (guard_bb != bb_before_epilog)
