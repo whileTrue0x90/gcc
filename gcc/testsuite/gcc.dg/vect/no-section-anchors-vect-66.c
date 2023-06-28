@@ -29,6 +29,7 @@ int main1 ()
     {
       for (j = 0; j < N; j++)
         {
+#pragma GCC novector
            if (ia[2][6][j] != 5)
                 abort();
         }
@@ -45,6 +46,7 @@ int main1 ()
     {
       for (j = 2; j < N+2; j++)
         {
+#pragma GCC novector
            if (ia[3][6][j] != 5)
                 abort();
         }
@@ -62,6 +64,7 @@ int main1 ()
   /* check results: */  
   for (i = 0; i < 16; i++)
     {
+#pragma GCC novector
       for (j = 0; j < N; j++)
         {
            if (ic[2][1][6][j+1] != 5)
