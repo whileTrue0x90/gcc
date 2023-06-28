@@ -481,7 +481,7 @@ expand_vector_comparison (gimple_stmt_iterator *gsi, tree type, tree op0,
 	    }
 	  t = gimplify_build1 (gsi, VIEW_CONVERT_EXPR, type, t);
 	}
-      else
+      else if (TYPE_VECTOR_SUBPARTS (type).is_constant ())
 	t = expand_vector_piecewise (gsi, do_compare, type,
 				     TREE_TYPE (TREE_TYPE (op0)), op0, op1,
 				     code, false);
