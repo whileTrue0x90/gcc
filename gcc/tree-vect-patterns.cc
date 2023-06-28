@@ -128,6 +128,7 @@ vect_init_pattern_stmt (vec_info *vinfo, gimple *pattern_stmt,
   STMT_VINFO_RELATED_STMT (pattern_stmt_info) = orig_stmt_info;
   STMT_VINFO_DEF_TYPE (pattern_stmt_info)
     = STMT_VINFO_DEF_TYPE (orig_stmt_info);
+  STMT_VINFO_TYPE (pattern_stmt_info) = STMT_VINFO_TYPE (orig_stmt_info);
   if (!STMT_VINFO_VECTYPE (pattern_stmt_info))
     {
       gcc_assert (!vectype
@@ -2488,27 +2489,37 @@ static gimple *
 vect_recog_bitfield_ref_pattern (vec_info *vinfo, stmt_vec_info stmt_info,
 				 tree *type_out)
 {
-  gassign *first_stmt = dyn_cast <gassign *> (stmt_info->stmt);
+  gassign *conv_stmt = dyn_cast <gassign *> (stmt_info->stmt);
+  gcond *cond_stmt = dyn_cast <gcond *> (stmt_info->stmt);
 
-  if (!first_stmt)
-    return NULL;
-
-  gassign *bf_stmt;
-  if (CONVERT_EXPR_CODE_P (gimple_assign_rhs_code (first_stmt))
-      && TREE_CODE (gimple_assign_rhs1 (first_stmt)) == SSA_NAME)
+  gimple *bf_stmt = NULL;
+  tree cond_cst = NULL_TREE;
+  if (cond_stmt)
     {
-      gimple *second_stmt
-	= SSA_NAME_DEF_STMT (gimple_assign_rhs1 (first_stmt));
-      bf_stmt = dyn_cast <gassign *> (second_stmt);
-      if (!bf_stmt
-	  || gimple_assign_rhs_code (bf_stmt) != BIT_FIELD_REF)
+      tree op = gimple_cond_lhs (cond_stmt);
+      if (TREE_CODE (op) != SSA_NAME)
+	return NULL;
+      bf_stmt = dyn_cast <gassign *> (SSA_NAME_DEF_STMT (op));
+      cond_cst = gimple_cond_rhs (cond_stmt);
+      if (TREE_CODE (cond_cst) != INTEGER_CST)
 	return NULL;
     }
-  else
+  else if (conv_stmt
+	   && CONVERT_EXPR_CODE_P (gimple_assign_rhs_code (conv_stmt))
+	   && TREE_CODE (gimple_assign_rhs1 (conv_stmt)) == SSA_NAME)
+    {
+      gimple *second_stmt = SSA_NAME_DEF_STMT (gimple_assign_rhs1 (conv_stmt));
+      bf_stmt = dyn_cast <gassign *> (second_stmt);
+    }
+
+  if (!bf_stmt
+      || gimple_assign_rhs_code (bf_stmt) != BIT_FIELD_REF)
     return NULL;
 
   tree bf_ref = gimple_assign_rhs1 (bf_stmt);
   tree container = TREE_OPERAND (bf_ref, 0);
+  tree ret_type = cond_cst ? TREE_TYPE (container)
+			   : TREE_TYPE (gimple_assign_lhs (conv_stmt));
 
   if (!bit_field_offset (bf_ref).is_constant ()
       || !bit_field_size (bf_ref).is_constant ()
@@ -2522,8 +2533,6 @@ vect_recog_bitfield_ref_pattern (vec_info *vinfo, stmt_vec_info stmt_info,
 
   gimple *use_stmt, *pattern_stmt;
   use_operand_p use_p;
-  tree ret = gimple_assign_lhs (first_stmt);
-  tree ret_type = TREE_TYPE (ret);
   bool shift_first = true;
   tree container_type = TREE_TYPE (container);
   tree vectype = get_vectype_for_scalar_type (vinfo, container_type);
@@ -2560,7 +2569,8 @@ vect_recog_bitfield_ref_pattern (vec_info *vinfo, stmt_vec_info stmt_info,
   /* If the only use of the result of this BIT_FIELD_REF + CONVERT is a
      PLUS_EXPR then do the shift last as some targets can combine the shift and
      add into a single instruction.  */
-  if (single_imm_use (gimple_assign_lhs (first_stmt), &use_p, &use_stmt))
+  if (conv_stmt
+      && single_imm_use (gimple_assign_lhs (conv_stmt), &use_p, &use_stmt))
     {
       if (gimple_code (use_stmt) == GIMPLE_ASSIGN
 	  && gimple_assign_rhs_code (use_stmt) == PLUS_EXPR)
@@ -2620,7 +2630,21 @@ vect_recog_bitfield_ref_pattern (vec_info *vinfo, stmt_vec_info stmt_info,
 			       NOP_EXPR, result);
     }
 
-  *type_out = STMT_VINFO_VECTYPE (stmt_info);
+  if (cond_cst)
+    {
+      append_pattern_def_seq (vinfo, stmt_info, pattern_stmt, vectype);
+      pattern_stmt
+	= gimple_build_cond (gimple_cond_code (cond_stmt),
+			     gimple_get_lhs (pattern_stmt),
+			     fold_convert (ret_type, cond_cst),
+			     gimple_cond_true_label (cond_stmt),
+			     gimple_cond_false_label (cond_stmt));
+      *type_out = STMT_VINFO_VECTYPE (stmt_info);
+    }
+  else
+    *type_out
+      = get_vectype_for_scalar_type (vinfo,
+				     TREE_TYPE (gimple_get_lhs (pattern_stmt)));
   vect_pattern_detected ("bitfield_ref pattern", stmt_info->stmt);
 
   return pattern_stmt;
