@@ -305,8 +305,8 @@ DEFTREECODE (IF_STMT, "if_stmt", tcc_statement, 4)
 
 /* Used to represent a range-based `for' statement. The operands are
    RANGE_FOR_DECL, RANGE_FOR_EXPR, RANGE_FOR_BODY, RANGE_FOR_SCOPE,
-   RANGE_FOR_UNROLL, and RANGE_FOR_INIT_STMT, respectively.  Only used in
-   templates.  */
+   RANGE_FOR_UNROLL, RANGE_FOR_NOVECTOR and RANGE_FOR_INIT_STMT,
+   respectively.  Only used in templates.  */
 DEFTREECODE (RANGE_FOR_STMT, "range_for_stmt", tcc_statement, 6)
 
 /* Used to represent an expression statement.  Use `EXPR_STMT_EXPR' to

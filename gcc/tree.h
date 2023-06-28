@@ -1112,6 +1112,8 @@ extern void omp_clause_range_check_failed (const_tree, const char *, int,
   (TREE_NOT_CHECK2 (NODE, TREE_VEC, SSA_NAME)->base.u.bits.lang_flag_5)
 #define TREE_LANG_FLAG_6(NODE) \
   (TREE_NOT_CHECK2 (NODE, TREE_VEC, SSA_NAME)->base.u.bits.lang_flag_6)
+#define TREE_LANG_FLAG_7(NODE) \
+  (TREE_NOT_CHECK2 (NODE, TREE_VEC, SSA_NAME)->base.u.bits.lang_flag_7)
 
 /* Define additional fields and accessors for nodes representing constants.  */
 

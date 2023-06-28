@@ -1063,6 +1063,7 @@ struct GTY(()) tree_base {
       unsigned lang_flag_4 : 1;
       unsigned lang_flag_5 : 1;
       unsigned lang_flag_6 : 1;
+      unsigned lang_flag_7 : 1;
       unsigned saturating_flag : 1;
 
       unsigned unsigned_flag : 1;
@@ -1071,7 +1072,7 @@ struct GTY(()) tree_base {
       unsigned nameless_flag : 1;
       unsigned atomic_flag : 1;
       unsigned unavailable_flag : 1;
-      unsigned spare0 : 2;
+      unsigned spare0 : 1;
 
       unsigned spare1 : 8;
 
