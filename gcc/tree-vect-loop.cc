@@ -1007,6 +1007,8 @@ _loop_vec_info::_loop_vec_info (class loop *loop_in, vec_info_shared *shared)
     partial_load_store_bias (0),
     peeling_for_gaps (false),
     peeling_for_niter (false),
+    early_breaks (false),
+    non_break_control_flow (false),
     no_data_dependencies (false),
     has_mask_store (false),
     scalar_loop_scaling (profile_probability::uninitialized ()),
@@ -1198,6 +1200,14 @@ vect_need_peeling_or_partial_vectors_p (loop_vec_info loop_vinfo)
   if (!th && LOOP_VINFO_ORIG_LOOP_INFO (loop_vinfo))
     th = LOOP_VINFO_COST_MODEL_THRESHOLD (LOOP_VINFO_ORIG_LOOP_INFO
 					  (loop_vinfo));
+
+  /* When we have multiple exits and VF is unknown, we must require partial
+     vectors because the loop bounds is not a minimum but a maximum.  That is to
+     say we cannot unpredicate the main loop unless we peel or use partial
+     vectors in the epilogue.  */
+  if (LOOP_VINFO_EARLY_BREAKS (loop_vinfo)
+      && !LOOP_VINFO_VECT_FACTOR (loop_vinfo).is_constant ())
+    return true;
 
   if (LOOP_VINFO_NITERS_KNOWN_P (loop_vinfo)
       && LOOP_VINFO_PEELING_FOR_ALIGNMENT (loop_vinfo) >= 0)
@@ -1652,12 +1662,12 @@ vect_compute_single_scalar_iteration_cost (loop_vec_info loop_vinfo)
   loop_vinfo->scalar_costs->finish_cost (nullptr);
 }
 
-
 /* Function vect_analyze_loop_form.
 
    Verify that certain CFG restrictions hold, including:
    - the loop has a pre-header
-   - the loop has a single entry and exit
+   - the loop has a single entry
+   - nested loops can have only a single exit.
    - the loop exit condition is simple enough
    - the number of iterations can be analyzed, i.e, a countable loop.  The
      niter could be analyzed under some assumptions.  */
@@ -1692,11 +1702,6 @@ vect_analyze_loop_form (class loop *loop, vect_loop_form_info *info)
                            | +--> latch --+
                            |
                         (exit-bb)  */
-
-      if (loop->num_nodes != 2)
-	return opt_result::failure_at (vect_location,
-				       "not vectorized:"
-				       " control flow in loop.\n");
 
       if (empty_block_p (loop->header))
 	return opt_result::failure_at (vect_location,
@@ -1768,11 +1773,13 @@ vect_analyze_loop_form (class loop *loop, vect_loop_form_info *info)
         dump_printf_loc (MSG_NOTE, vect_location,
 			 "Considering outer-loop vectorization.\n");
       info->inner_loop_cond = inner.loop_cond;
+
+      if (!single_exit (loop))
+	return opt_result::failure_at (vect_location,
+				       "not vectorized: multiple exits.\n");
+
     }
 
-  if (!single_exit (loop))
-    return opt_result::failure_at (vect_location,
-				   "not vectorized: multiple exits.\n");
   if (EDGE_COUNT (loop->header->preds) != 2)
     return opt_result::failure_at (vect_location,
 				   "not vectorized:"
@@ -1788,11 +1795,36 @@ vect_analyze_loop_form (class loop *loop, vect_loop_form_info *info)
 				   "not vectorized: latch block not empty.\n");
 
   /* Make sure the exit is not abnormal.  */
-  edge e = single_exit (loop);
-  if (e->flags & EDGE_ABNORMAL)
-    return opt_result::failure_at (vect_location,
-				   "not vectorized:"
-				   " abnormal loop exit edge.\n");
+  auto_vec<edge> exits = get_loop_exit_edges (loop);
+  edge nexit = loop->vec_loop_iv;
+  for (edge e : exits)
+    {
+      if (e->flags & EDGE_ABNORMAL)
+	return opt_result::failure_at (vect_location,
+				       "not vectorized:"
+				       " abnormal loop exit edge.\n");
+      /* Early break BB must be after the main exit BB.  In theory we should
+	 be able to vectorize the inverse order, but the current flow in the
+	 the vectorizer always assumes you update successor PHI nodes, not
+	 preds.  */
+      if (e != nexit && !dominated_by_p (CDI_DOMINATORS, nexit->src, e->src))
+	return opt_result::failure_at (vect_location,
+				       "not vectorized:"
+				       " abnormal loop exit edge order.\n");
+    }
+
+  /* We currently only support early exit loops with known bounds.   */
+  if (exits.length () > 1)
+    {
+      class tree_niter_desc niter;
+      if (!number_of_iterations_exit_assumptions (loop, nexit, &niter, NULL)
+	  || chrec_contains_undetermined (niter.niter)
+	  || !evolution_function_is_constant_p (niter.niter))
+	return opt_result::failure_at (vect_location,
+				       "not vectorized:"
+				       " early breaks only supported on loops"
+				       " with known iteration bounds.\n");
+    }
 
   info->conds
     = vect_get_loop_niters (loop, &info->assumptions,
@@ -1865,6 +1897,10 @@ vect_create_loop_vinfo (class loop *loop, vec_info_shared *shared,
     }
   LOOP_VINFO_LOOP_CONDS (loop_vinfo).safe_splice (info->alt_loop_conds);
   LOOP_VINFO_LOOP_IV_COND (loop_vinfo) = info->loop_cond;
+
+  /* Check to see if we're vectorizing multiple exits.  */
+  LOOP_VINFO_EARLY_BREAKS (loop_vinfo)
+    = !LOOP_VINFO_LOOP_CONDS (loop_vinfo).is_empty ();
 
   if (info->inner_loop_cond)
     {
@@ -3070,7 +3106,8 @@ start_over:
 
   /* If an epilogue loop is required make sure we can create one.  */
   if (LOOP_VINFO_PEELING_FOR_GAPS (loop_vinfo)
-      || LOOP_VINFO_PEELING_FOR_NITER (loop_vinfo))
+      || LOOP_VINFO_PEELING_FOR_NITER (loop_vinfo)
+      || LOOP_VINFO_EARLY_BREAKS (loop_vinfo))
     {
       if (dump_enabled_p ())
         dump_printf_loc (MSG_NOTE, vect_location, "epilog loop required\n");
@@ -5797,7 +5834,7 @@ vect_create_epilog_for_reduction (loop_vec_info loop_vinfo,
   basic_block exit_bb;
   tree scalar_dest;
   tree scalar_type;
-  gimple *new_phi = NULL, *phi;
+  gimple *new_phi = NULL, *phi = NULL;
   gimple_stmt_iterator exit_gsi;
   tree new_temp = NULL_TREE, new_name, new_scalar_dest;
   gimple *epilog_stmt = NULL;
@@ -6039,6 +6076,33 @@ vect_create_epilog_for_reduction (loop_vec_info loop_vinfo,
 	  new_def = gimple_convert (&stmts, vectype, new_def);
 	  reduc_inputs.quick_push (new_def);
 	}
+
+	/* Update the other exits.  */
+	if (LOOP_VINFO_EARLY_BREAKS (loop_vinfo))
+	  {
+	    vec<edge> alt_exits = LOOP_VINFO_ALT_EXITS (loop_vinfo);
+	    gphi_iterator gsi, gsi1;
+	    for (edge exit : alt_exits)
+	      {
+		/* Find the phi node to propaget into the exit block for each
+		   exit edge.  */
+		for (gsi = gsi_start_phis (exit_bb),
+		     gsi1 = gsi_start_phis (exit->src);
+		     !gsi_end_p (gsi) && !gsi_end_p (gsi1);
+		     gsi_next (&gsi), gsi_next (&gsi1))
+		  {
+		    /* There really should be a function to just get the number
+		       of phis inside a bb.  */
+		    if (phi && phi == gsi.phi ())
+		      {
+			gphi *phi1 = gsi1.phi ();
+			SET_PHI_ARG_DEF (phi, exit->dest_idx,
+					 PHI_RESULT (phi1));
+			break;
+		      }
+		  }
+	      }
+	  }
       gsi_insert_seq_before (&exit_gsi, stmts, GSI_SAME_STMT);
     }
 
@@ -10355,6 +10419,13 @@ vectorizable_live_operation (vec_info *vinfo,
 	   new_tree = lane_extract <vec_lhs', ...>;
 	   lhs' = new_tree;  */
 
+      /* When vectorizing an early break, any live statement that is used
+	 outside of the loop are dead.  The loop will never get to them.
+	 We could change the liveness value during analysis instead but since
+	 the below code is invalid anyway just ignore it during codegen.  */
+      if (LOOP_VINFO_EARLY_BREAKS (loop_vinfo))
+	return true;
+
       class loop *loop = LOOP_VINFO_LOOP (loop_vinfo);
       basic_block exit_bb = LOOP_VINFO_IV_EXIT (loop_vinfo)->dest;
       gcc_assert (single_pred_p (exit_bb));
@@ -11273,7 +11344,7 @@ vect_transform_loop (loop_vec_info loop_vinfo, gimple *loop_vectorized_call)
   /* Make sure there exists a single-predecessor exit bb.  Do this before 
      versioning.   */
   edge e = LOOP_VINFO_IV_EXIT (loop_vinfo);
-  if (! single_pred_p (e->dest))
+  if (e && ! single_pred_p (e->dest) && !LOOP_VINFO_EARLY_BREAKS (loop_vinfo))
     {
       split_loop_exit_edge (e, true);
       if (dump_enabled_p ())
@@ -11299,7 +11370,7 @@ vect_transform_loop (loop_vec_info loop_vinfo, gimple *loop_vectorized_call)
   if (LOOP_VINFO_SCALAR_LOOP (loop_vinfo))
     {
       e = single_exit (LOOP_VINFO_SCALAR_LOOP (loop_vinfo));
-      if (! single_pred_p (e->dest))
+      if (e && ! single_pred_p (e->dest))
 	{
 	  split_loop_exit_edge (e, true);
 	  if (dump_enabled_p ())
@@ -11637,7 +11708,8 @@ vect_transform_loop (loop_vec_info loop_vinfo, gimple *loop_vectorized_call)
 
   /* Loops vectorized with a variable factor won't benefit from
      unrolling/peeling.  */
-  if (!vf.is_constant ())
+  if (!vf.is_constant ()
+      && !LOOP_VINFO_EARLY_BREAKS (loop_vinfo))
     {
       loop->unroll = 1;
       if (dump_enabled_p ())

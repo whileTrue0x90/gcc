@@ -3072,7 +3072,12 @@ loop_only_exit_p (const class loop *loop, basic_block *body, const_edge exit)
   gimple_stmt_iterator bsi;
   unsigned i;
 
-  if (exit != single_exit (loop))
+  /* We need to check for alternative exits since exit can be NULL.  */
+  auto exits = get_loop_exit_edges (loop);
+  if (exits.length () != 1)
+    return false;
+
+  if (exit != exits[0])
     return false;
 
   for (i = 0; i < loop->num_nodes; i++)

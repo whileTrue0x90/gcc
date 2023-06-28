@@ -63,6 +63,7 @@ enum vect_def_type {
   vect_internal_def,
   vect_induction_def,
   vect_reduction_def,
+  vect_early_exit_def,
   vect_double_reduction_def,
   vect_nested_cycle,
   vect_first_order_recurrence,
@@ -876,6 +877,13 @@ public:
      we need to peel off iterations at the end to form an epilogue loop.  */
   bool peeling_for_niter;
 
+  /* When the loop has early breaks that we can vectorize we need to peel
+     the loop for the break finding loop.  */
+  bool early_breaks;
+
+  /* When the loop has a non-early break control flow inside.  */
+  bool non_break_control_flow;
+
   /* List of loop additional IV conditionals found in the loop.  */
   auto_vec<gcond *> conds;
 
@@ -985,9 +993,11 @@ public:
 #define LOOP_VINFO_REDUCTION_CHAINS(L)     (L)->reduction_chains
 #define LOOP_VINFO_PEELING_FOR_GAPS(L)     (L)->peeling_for_gaps
 #define LOOP_VINFO_PEELING_FOR_NITER(L)    (L)->peeling_for_niter
+#define LOOP_VINFO_EARLY_BREAKS(L)         (L)->early_breaks
 #define LOOP_VINFO_EARLY_BRK_CONFLICT_STMTS(L) (L)->early_break_conflict
 #define LOOP_VINFO_EARLY_BRK_DEST_BB(L)    (L)->early_break_dest_bb
 #define LOOP_VINFO_EARLY_BRK_VUSES(L)      (L)->early_break_vuses
+#define LOOP_VINFO_GENERAL_CTR_FLOW(L)     (L)->non_break_control_flow
 #define LOOP_VINFO_LOOP_CONDS(L)           (L)->conds
 #define LOOP_VINFO_LOOP_IV_COND(L)         (L)->loop_iv_cond
 #define LOOP_VINFO_NO_DATA_DEPENDENCIES(L) (L)->no_data_dependencies
@@ -1038,8 +1048,8 @@ public:
    stack.  */
 typedef opt_pointer_wrapper <loop_vec_info> opt_loop_vec_info;
 
-inline loop_vec_info
-loop_vec_info_for_loop (class loop *loop)
+static inline loop_vec_info
+loop_vec_info_for_loop (const class loop *loop)
 {
   return (loop_vec_info) loop->aux;
 }
@@ -1789,7 +1799,7 @@ is_loop_header_bb_p (basic_block bb)
 {
   if (bb == (bb->loop_father)->header)
     return true;
-  gcc_checking_assert (EDGE_COUNT (bb->preds) == 1);
+
   return false;
 }
 
@@ -2176,9 +2186,10 @@ class auto_purge_vect_location
    in tree-vect-loop-manip.cc.  */
 extern void vect_set_loop_condition (class loop *, loop_vec_info,
 				     tree, tree, tree, bool);
-extern bool slpeel_can_duplicate_loop_p (const class loop *, const_edge);
+extern bool slpeel_can_duplicate_loop_p (const loop_vec_info, const_edge);
 class loop *slpeel_tree_duplicate_loop_to_edge_cfg (class loop *,
-						     class loop *, edge);
+						    class loop *, edge, bool,
+						    vec<basic_block> * = NULL);
 class loop *vect_loop_versioning (loop_vec_info, gimple *);
 extern class loop *vect_do_peeling (loop_vec_info, tree, tree,
 				    tree *, tree *, tree *, int, bool, bool,

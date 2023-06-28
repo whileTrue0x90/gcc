@@ -344,9 +344,34 @@ vect_stmt_relevant_p (stmt_vec_info stmt_info, loop_vec_info loop_vinfo,
   *live_p = false;
 
   /* cond stmt other than loop exit cond.  */
-  if (is_ctrl_stmt (stmt_info->stmt)
-      && STMT_VINFO_TYPE (stmt_info) != loop_exit_ctrl_vec_info_type)
-    *relevant = vect_used_in_scope;
+  if (is_ctrl_stmt (stmt_info->stmt))
+    {
+      /* Ideally EDGE_LOOP_EXIT would have been set on the exit edge, but
+	 it looks like loop_manip doesn't do that..  So we have to do it
+	 the hard way.  */
+      basic_block bb = gimple_bb (stmt_info->stmt);
+      bool exit_bb = false, early_exit = false;
+      edge_iterator ei;
+      edge e;
+      FOR_EACH_EDGE (e, ei, bb->succs)
+        if (!flow_bb_inside_loop_p (loop, e->dest))
+	  {
+	    exit_bb = true;
+	    early_exit = loop->vec_loop_iv->src != bb;
+	    break;
+	  }
+
+      /* We should have processed any exit edge, so an edge not an early
+	 break must be a loop IV edge.  We need to distinguish between the
+	 two as we don't want to generate code for the main loop IV.  */
+      if (exit_bb)
+	{
+	  if (early_exit)
+	    *relevant = vect_used_in_scope;
+	}
+      else if (bb->loop_father == loop)
+	LOOP_VINFO_GENERAL_CTR_FLOW (loop_vinfo) = true;
+    }
 
   /* changing memory.  */
   if (gimple_code (stmt_info->stmt) != GIMPLE_PHI)
@@ -358,6 +383,11 @@ vect_stmt_relevant_p (stmt_vec_info stmt_info, loop_vec_info loop_vinfo,
                            "vec_stmt_relevant_p: stmt has vdefs.\n");
 	*relevant = vect_used_in_scope;
       }
+
+  auto_vec<edge> exits = get_loop_exit_edges (loop);
+  auto_bitmap exit_bbs;
+  for (edge exit : exits)
+    bitmap_set_bit (exit_bbs, exit->dest->index);
 
   /* uses outside the loop.  */
   FOR_EACH_PHI_OR_STMT_DEF (def_p, stmt_info->stmt, op_iter, SSA_OP_DEF)
@@ -377,7 +407,7 @@ vect_stmt_relevant_p (stmt_vec_info stmt_info, loop_vec_info loop_vinfo,
 	      /* We expect all such uses to be in the loop exit phis
 		 (because of loop closed form)   */
 	      gcc_assert (gimple_code (USE_STMT (use_p)) == GIMPLE_PHI);
-	      gcc_assert (bb == single_exit (loop)->dest);
+	      gcc_assert (bitmap_bit_p (exit_bbs, bb->index));
 
               *live_p = true;
 	    }
@@ -683,6 +713,13 @@ vect_mark_stmts_to_be_vectorized (loop_vec_info loop_vinfo, bool *fatal)
 	}
     }
 
+  /* Ideally this should be in vect_analyze_loop_form but we haven't seen all
+     the conds yet at that point and there's no quick way to retrieve them.  */
+  if (LOOP_VINFO_GENERAL_CTR_FLOW (loop_vinfo))
+    return opt_result::failure_at (vect_location,
+				   "not vectorized:"
+				   " unsupported control flow in loop.\n");
+
   /* 2. Process_worklist */
   while (worklist.length () > 0)
     {
@@ -778,6 +815,20 @@ vect_mark_stmts_to_be_vectorized (loop_vec_info loop_vinfo, bool *fatal)
 			return res;
 		    }
                  }
+	    }
+	  else if (gcond *cond = dyn_cast <gcond *> (stmt_vinfo->stmt))
+	    {
+	      enum tree_code rhs_code = gimple_cond_code (cond);
+	      gcc_assert (TREE_CODE_CLASS (rhs_code) == tcc_comparison);
+	      opt_result res
+		= process_use (stmt_vinfo, gimple_cond_lhs (cond),
+			       loop_vinfo, relevant, &worklist, false);
+	      if (!res)
+		return res;
+	      res = process_use (stmt_vinfo, gimple_cond_rhs (cond),
+				loop_vinfo, relevant, &worklist, false);
+	      if (!res)
+		return res;
             }
 	  else if (gcall *call = dyn_cast <gcall *> (stmt_vinfo->stmt))
 	    {
@@ -11919,11 +11970,15 @@ vect_analyze_stmt (vec_info *vinfo,
 			     node_instance, cost_vec);
       if (!res)
 	return res;
-   }
+    }
+
+  if (is_ctrl_stmt (stmt_info->stmt))
+    STMT_VINFO_DEF_TYPE (stmt_info) = vect_early_exit_def;
 
   switch (STMT_VINFO_DEF_TYPE (stmt_info))
     {
       case vect_internal_def:
+      case vect_early_exit_def:
         break;
 
       case vect_reduction_def:
@@ -11956,6 +12011,7 @@ vect_analyze_stmt (vec_info *vinfo,
     {
       gcall *call = dyn_cast <gcall *> (stmt_info->stmt);
       gcc_assert (STMT_VINFO_VECTYPE (stmt_info)
+		  || gimple_code (stmt_info->stmt) == GIMPLE_COND
 		  || (call && gimple_call_lhs (call) == NULL_TREE));
       *need_to_vectorize = true;
     }
