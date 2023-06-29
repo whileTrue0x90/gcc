@@ -1321,9 +1321,13 @@ pass_harden_control_flow_redundancy::execute (function *fun)
 		   || bb == bb_eh_cleanup)
 		: (!is_a <gcall *> (stmt)
 		   || !gimple_call_noreturn_p (stmt))
-		? (/* Catch cases in which successors would be
+		? (stmt_can_make_abnormal_goto (stmt)
+		   /* ??? Check before indirect nonlocal goto, or
+		      calls thereof?  */
+		   ? false
+		   /* Catch cases in which successors would be
 		      expected.  */
-		   gcc_unreachable (), false)
+		   : (gcc_unreachable (), false))
 		: (!flag_exceptions
 		   || gimple_call_nothrow_p (as_a <gcall *> (stmt)))
 		? check_before_nothrow_noreturn_calls
