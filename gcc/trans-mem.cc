@@ -754,6 +754,12 @@ diagnose_tm_1 (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_ASM:
+      // Allow empty asm statements.  These may be used to
+      // stabilize or detach values, but since they do nothing,
+      // they do not harm transactions.
+      if (!*gimple_asm_string (as_a <gasm *>(stmt)))
+	break;
+
       /* ??? We ought to come up with a way to add attributes to
 	 asm statements, and then add "transaction_safe" to it.
 	 Either that or get the language spec to resurrect __tm_waiver.  */
@@ -1776,6 +1782,11 @@ lower_sequence_tm (gimple_stmt_iterator *gsi, bool *handled_ops_p,
       break;
 
     case GIMPLE_ASM:
+      // Allow empty asm statements.  These may be used to
+      // stabilize or detach values, but since they do nothing,
+      // they do not harm transactions.
+      if (!*gimple_asm_string (as_a <gasm *>(stmt)))
+	break;
       *state |= GTMA_MAY_ENTER_IRREVOCABLE;
       break;
 
@@ -2653,6 +2664,11 @@ expand_block_tm (struct tm_region *region, basic_block bb)
 	  break;
 
 	case GIMPLE_ASM:
+	  // Allow empty asm statements.  These may be used to
+	  // stabilize or detach values, but since they do nothing,
+	  // they do not harm transactions.
+	  if (!*gimple_asm_string (as_a <gasm *>(gsi_stmt (gsi))))
+	    break;
 	  gcc_unreachable ();
 
 	default:
@@ -4423,6 +4439,12 @@ ipa_tm_scan_irr_block (basic_block bb)
 	  }
 
 	case GIMPLE_ASM:
+	  // Allow empty asm statements.  These may be used to
+	  // stabilize or detach values, but since they do nothing,
+	  // they do not harm transactions.
+	  if (!*gimple_asm_string (as_a <gasm *>(gsi_stmt (gsi))))
+	    break;
+
 	  /* ??? The Approved Method of indicating that an inline
 	     assembly statement is not relevant to the transaction
 	     is to wrap it in a __tm_waiver block.  This is not
