@@ -69,6 +69,7 @@ along with GCC; see the file COPYING3.  If not see
 #include "varasm.h"
 #include "internal-fn.h"
 #include "gimple-range.h"
+#include "tree-ssa-loop-niter.h" // stmt_dominates_stmt_p
 
 /* ??? Move this to some header, it's defined in fold-const.c.  */
 extern tree
@@ -7077,7 +7078,7 @@ maybe_fold_comparisons_from_match_pd (tree type, enum tree_code code,
    Same as ssa_is_replaceable_p, except that we don't insist it has a
    single use.  */
 
-bool
+static bool
 ssa_is_substitutable_p (gimple *stmt)
 {
 #if 0
@@ -7158,9 +7159,10 @@ is_cast_p (tree *name)
       if (gimple_num_ops (def) != 2)
 	break;
 
-      if (get_gimple_rhs_class (gimple_expr_code (def))
-	  == GIMPLE_SINGLE_RHS)
+      if (gimple_assign_single_p (def))
 	{
+	  if (gimple_assign_load_p (def))
+	    break;
 	  *name = gimple_assign_rhs1 (def);
 	  continue;
 	}
@@ -7197,8 +7199,7 @@ is_binop_p (enum tree_code code, tree *name)
 	  return 0;
 
 	case 2:
-	  if (get_gimple_rhs_class (gimple_expr_code (def))
-	      == GIMPLE_SINGLE_RHS)
+	  if (gimple_assign_single_p (def) && !gimple_assign_load_p (def))
 	    {
 	      *name = gimple_assign_rhs1 (def);
 	      continue;
@@ -7206,7 +7207,7 @@ is_binop_p (enum tree_code code, tree *name)
 	  return 0;
 
 	case 3:
-	  ;
+	  break;
 	}
 
       if (gimple_assign_rhs_code (def) != code)
@@ -7251,6 +7252,26 @@ prepare_xor (tree l_arg, tree *r_arg)
   return ret;
 }
 
+/* If EXP is a SSA_NAME whose DEF is a load stmt, set *LOAD to it and
+   return its RHS, otherwise return EXP.  */
+
+static tree
+follow_load (tree exp, gimple **load)
+{
+  if (TREE_CODE (exp) == SSA_NAME
+      && !SSA_NAME_IS_DEFAULT_DEF (exp))
+    {
+      gimple *def = SSA_NAME_DEF_STMT (exp);
+      if (gimple_assign_load_p (def))
+	{
+	  *load = def;
+	  exp = gimple_assign_rhs1 (def);
+	}
+    }
+
+  return exp;
+}
+
 /* Subroutine for fold_truth_andor_1: decode a field reference.
 
    If EXP is a comparison reference, we return the innermost reference.
@@ -7277,6 +7298,9 @@ prepare_xor (tree l_arg, tree *r_arg)
    BIT_XOR_EXPR compared with zero.  We're to take the first or second
    operand thereof if so.  It should be zero otherwise.
 
+   *LOAD is set to the load stmt of the innermost reference, if any,
+   *and NULL otherwise.
+
    Return 0 if this is not a component reference or is one that we can't
    do anything with.  */
 
@@ -7284,7 +7308,8 @@ static tree
 decode_field_reference (location_t loc, tree *exp_, HOST_WIDE_INT *pbitsize,
 			HOST_WIDE_INT *pbitpos, machine_mode *pmode,
 			int *punsignedp, int *preversep, int *pvolatilep,
-			tree *pmask, tree *pand_mask, int xor_which)
+			tree *pmask, tree *pand_mask, int xor_which,
+			gimple **load)
 {
   tree exp = *exp_;
   tree outer_type = 0;
@@ -7294,11 +7319,13 @@ decode_field_reference (location_t loc, tree *exp_, HOST_WIDE_INT *pbitsize,
   unsigned int precision;
   HOST_WIDE_INT shiftrt = 0;
 
+  *load = NULL;
+
   /* All the optimizations using this function assume integer fields.
      There are problems with FP fields since the type_for_size call
      below can fail for, e.g., XFmode.  */
   if (! INTEGRAL_TYPE_P (TREE_TYPE (exp)))
-    return 0;
+    return NULL_TREE;
 
   /* We are interested in the bare arrangement of bits, so strip everything
      that doesn't affect the machine mode.  However, record the type of the
@@ -7308,7 +7335,7 @@ decode_field_reference (location_t loc, tree *exp_, HOST_WIDE_INT *pbitsize,
   if ((and_mask = is_binop_p (BIT_AND_EXPR, &exp)))
     {
       if (TREE_CODE (and_mask) != INTEGER_CST)
-	return 0;
+	return NULL_TREE;
     }
 
   if (xor_which)
@@ -7326,15 +7353,17 @@ decode_field_reference (location_t loc, tree *exp_, HOST_WIDE_INT *pbitsize,
   if (tree shift = is_binop_p (RSHIFT_EXPR, &exp))
     {
       if (TREE_CODE (shift) != INTEGER_CST || !tree_fits_shwi_p (shift))
-	return 0;
+	return NULL_TREE;
       shiftrt = tree_to_shwi (shift);
       if (shiftrt <= 0)
-	return 0;
+	return NULL_TREE;
     }
 
   if (tree t = is_cast_p (&exp))
     if (!outer_type)
       outer_type = t;
+
+  exp = follow_load (exp, load);
 
   poly_int64 poly_bitsize, poly_bitpos;
   inner = get_inner_reference (exp, &poly_bitsize, &poly_bitpos, &offset,
@@ -7484,6 +7513,28 @@ compute_split_boundary_from_align (HOST_WIDE_INT align,
   return boundary;
 }
 
+/* Make a bit_field_ref.  If POINT is NULL, return the BIT_FIELD_REF.
+   Otherwise, build and insert a load stmt before POINT, and return
+   the SSA_NAME.  ???  Rewrite LOAD in terms of the bitfield?  */
+
+static tree
+make_bit_field_load (location_t loc, tree inner, tree orig_inner, tree type,
+		     HOST_WIDE_INT bitsize, poly_int64 bitpos,
+		     int unsignedp, int reversep, gimple *point)
+{
+  tree ref = make_bit_field_ref (loc, unshare_expr (inner),
+				 unshare_expr (orig_inner),
+				 type, bitsize, bitpos,
+				 unsignedp, reversep);
+  if (!point)
+    return ref;
+
+  gimple_stmt_iterator gsi = gsi_for_stmt (point);
+  return force_gimple_operand_gsi (&gsi, ref,
+				   true, NULL_TREE,
+				   true, GSI_SAME_STMT);
+}
+
 /* Initialize ln_arg[0] and ln_arg[1] to a pair of newly-created (at
    LOC) loads from INNER (from ORIG_INNER), of modes MODE and MODE2,
    respectively, starting at BIT_POS, using reversed endianness if
@@ -7503,7 +7554,8 @@ build_split_load (tree /* out */ ln_arg[2],
 		  HOST_WIDE_INT /* out */ shifted[2],
 		  location_t loc, tree inner, tree orig_inner,
 		  scalar_int_mode mode, scalar_int_mode mode2,
-		  HOST_WIDE_INT bit_pos, bool reversep)
+		  HOST_WIDE_INT bit_pos, bool reversep,
+		  gimple *point[2])
 {
   bitsiz[0] = GET_MODE_BITSIZE (mode);
   bitsiz[1] = GET_MODE_BITSIZE (mode2);
@@ -7512,9 +7564,9 @@ build_split_load (tree /* out */ ln_arg[2],
     {
       tree type = lang_hooks.types.type_for_size (bitsiz[i], 1);
       bitpos[i] = bit_pos;
-      ln_arg[i] = make_bit_field_ref (loc, inner, orig_inner,
+      ln_arg[i] = make_bit_field_load (loc, inner, orig_inner,
 				      type, bitsiz[i],
-				      bit_pos, 1, reversep);
+				       bit_pos, 1, reversep, point[i]);
       bit_pos += bitsiz[i];
     }
 
@@ -7575,6 +7627,87 @@ reuse_split_load (tree /* in[0] out[1] */ ln_arg[2],
     }
 }
 
+/* Return nonzero if LSTMT and RSTMT, assumed to load from the same
+   words, can be safely merged into a single load.  Return zero if
+   there are intervening stores, or if neither stmt dominates the
+   other.  If they are mergeable, return -1 if the merged load should
+   be inserted before LSTMT to dominate both, otherwise return +1.  */
+
+static int
+mergeable_loads_p (gimple *lstmt, gimple *rstmt)
+{
+  gimple *stmts[2] = { lstmt, rstmt };
+  int ret;
+
+  if (stmt_dominates_stmt_p (lstmt, rstmt))
+    {
+      ret = -1;
+      stmts[0] = lstmt;
+      stmts[1] = rstmt;
+    }
+  else if (stmt_dominates_stmt_p (rstmt, lstmt))
+    {
+      ret = 1;
+      stmts[1] = lstmt;
+      stmts[0] = rstmt;
+    }
+  else
+    return 0;
+
+  basic_block bbs[2] = { gimple_bb (stmts[0]), gimple_bb (stmts[1]) };
+  if (bbs[0] == bbs[1])
+    {
+      for (gimple_stmt_iterator gsi = gsi_for_stmt (stmts[0]);
+	   gsi_stmt (gsi) != stmts[1]; gsi_next (&gsi))
+	/* ??? For now, stop if we find any intervening vdefs.  */
+	if (gimple_vdef (gsi_stmt (gsi)))
+	  return 0;
+      return ret;
+    }
+
+  for (gimple_stmt_iterator gsi = gsi_for_stmt (stmts[0]);
+       !gsi_end_p (gsi); gsi_next (&gsi))
+    /* ??? For now, stop if we find any intervening vdefs.  */
+    if (gimple_vdef (gsi_stmt (gsi)))
+      return 0;
+
+  for (gphi_iterator gpi = gsi_start_phis (bbs[1]);
+       !gsi_end_p (gpi); gsi_next (&gpi))
+    /* ??? For now, stop if we find any intervening vdefs.  */
+    if (gimple_vdef (gsi_stmt (gpi)))
+      return 0;
+
+  for (gimple_stmt_iterator gsi = gsi_for_stmt (stmts[1]);
+       !gsi_end_p (gsi); gsi_prev (&gsi))
+    /* ??? For now, stop if we find any intervening vdefs.  */
+    if (gimple_vdef (gsi_stmt (gsi)))
+      return 0;
+
+  for (basic_block bb = bbs[1]; bb != bbs[0]; )
+    {
+      /* ??? For now, stop if any visited block has more than one
+	 predecessor.  */
+      if (!single_pred_p (bb))
+	return 0;
+
+      bb = single_pred (bb);
+
+      for (gphi_iterator gpi = gsi_start_phis (bbs[1]);
+	   !gsi_end_p (gpi); gsi_next (&gpi))
+	/* ??? For now, stop if we find any intervening vdefs.  */
+	if (gimple_vdef (gsi_stmt (gpi)))
+	  return 0;
+
+      for (gimple_stmt_iterator gsi = gsi_start_bb (bb);
+	   !gsi_end_p (gsi); gsi_next (&gsi))
+	/* ??? For now, stop if we find any intervening vdefs.  */
+	if (gimple_vdef (gsi_stmt (gsi)))
+	  return 0;
+    }
+
+  return ret;
+}
+
 /* Find ways of folding logical expressions of LHS and RHS:
    Try to merge two comparisons to the same innermost item.
    Look for range tests like "ch >= '0' && ch <= '9'".
@@ -7626,6 +7759,8 @@ fold_truth_andor_maybe_separate (location_t loc,
   enum tree_code orig_code = code;
   enum tree_code wanted_code;
   tree ll_inner, lr_inner, rl_inner, rr_inner;
+  gimple *ll_load, *lr_load, *rl_load, *rr_load;
+  int l_mergeable = 0, r_mergeable = 0;
   HOST_WIDE_INT ll_bitsize, ll_bitpos, lr_bitsize, lr_bitpos;
   HOST_WIDE_INT rl_bitsize, rl_bitpos, rr_bitsize, rr_bitpos;
   HOST_WIDE_INT xll_bitpos, xlr_bitpos, xrl_bitpos, xrr_bitpos;
@@ -7690,20 +7825,24 @@ fold_truth_andor_maybe_separate (location_t loc,
   ll_inner = decode_field_reference (loc, &ll_arg,
 				     &ll_bitsize, &ll_bitpos, &ll_mode,
 				     &ll_unsignedp, &ll_reversep, &volatilep,
-				     &ll_mask, &ll_and_mask, l_xor);
+				     &ll_mask, &ll_and_mask, l_xor,
+				     &ll_load);
   lr_inner = decode_field_reference (loc, &lr_arg,
 				     &lr_bitsize, &lr_bitpos, &lr_mode,
 				     &lr_unsignedp, &lr_reversep, &volatilep,
-				     &lr_mask, &lr_and_mask, 2 * l_xor);
+				     &lr_mask, &lr_and_mask, 2 * l_xor,
+				     &lr_load);
   int r_xor = prepare_xor (rl_arg, &rr_arg);
   rl_inner = decode_field_reference (loc, &rl_arg,
 				     &rl_bitsize, &rl_bitpos, &rl_mode,
 				     &rl_unsignedp, &rl_reversep, &volatilep,
-				     &rl_mask, &rl_and_mask, r_xor);
+				     &rl_mask, &rl_and_mask, r_xor,
+				     &rl_load);
   rr_inner = decode_field_reference (loc, &rr_arg,
 				     &rr_bitsize, &rr_bitpos, &rr_mode,
 				     &rr_unsignedp, &rr_reversep, &volatilep,
-				     &rr_mask, &rr_and_mask, 2 * r_xor);
+				     &rr_mask, &rr_and_mask, 2 * r_xor,
+				     &rr_load);
 
   /* It must be true that the inner operation on the lhs of each
      comparison must be the same if we are to be able to do anything.
@@ -7712,7 +7851,9 @@ fold_truth_andor_maybe_separate (location_t loc,
   if (volatilep
       || ll_reversep != rl_reversep
       || ll_inner == 0 || rl_inner == 0
-      || ! operand_equal_p (ll_inner, rl_inner, 0))
+      || ! operand_equal_p (ll_inner, rl_inner, 0)
+      || (ll_load && rl_load
+	  && ! (l_mergeable = mergeable_loads_p (ll_load, rl_load))))
     return 0;
 
   if (TREE_CODE (lr_arg) == INTEGER_CST
@@ -7723,7 +7864,9 @@ fold_truth_andor_maybe_separate (location_t loc,
     }
   else if (lr_reversep != rr_reversep
 	   || lr_inner == 0 || rr_inner == 0
-	   || ! operand_equal_p (lr_inner, rr_inner, 0))
+	   || ! operand_equal_p (lr_inner, rr_inner, 0)
+	   || (lr_load && rr_load
+	       && ! (r_mergeable = mergeable_loads_p (lr_load, rr_load))))
     return 0;
   else
     l_const = r_const = 0;
@@ -8032,18 +8175,38 @@ fold_truth_andor_maybe_separate (location_t loc,
 	{
 	  bitpos[1][0] = rnbitpos;
 	  bitsiz[1][0] = rnbitsize;
-	  ld_arg[1][0] = make_bit_field_ref (loc, lr_inner, lr_arg,
-					     rntype, rnbitsize, rnbitpos,
-					     lr_unsignedp || rr_unsignedp,
-					     lr_reversep);
+	  ld_arg[1][0] = make_bit_field_load (loc, lr_inner, lr_arg,
+					      rntype, rnbitsize, rnbitpos,
+					      lr_unsignedp || rr_unsignedp,
+					      lr_reversep,
+					      r_mergeable == 0
+					      ? NULL
+					      : r_mergeable < 0
+					      ? lr_load
+					      : rr_load);
 	}
 
       if (parts > 1)
 	{
 	  if (r_split_load)
-	    build_split_load (ld_arg[1], bitpos[1], bitsiz[1], toshift[1],
-			      shifted[1], loc, lr_inner, lr_arg,
-			      rnmode, rnmode2, rnbitpos, lr_reversep);
+	    {
+	      gimple *point[2];
+	      if (r_mergeable == 0)
+		point[0] = point[1] = NULL;
+	      else if (r_mergeable < 0)
+		{
+		  point[0] = lr_load;
+		  point[1] = rr_load;
+		}
+	      else
+		{
+		  point[0] = rr_load;
+		  point[1] = lr_load;
+		}
+	      build_split_load (ld_arg[1], bitpos[1], bitsiz[1], toshift[1],
+				shifted[1], loc, lr_inner, lr_arg,
+				rnmode, rnmode2, rnbitpos, lr_reversep, point);
+	    }
 	  else
 	    reuse_split_load (ld_arg[1], bitpos[1], bitsiz[1], toshift[1],
 			      shifted[1], xmask[1],
@@ -8115,18 +8278,38 @@ fold_truth_andor_maybe_separate (location_t loc,
     {
       bitpos[0][0] = lnbitpos;
       bitsiz[0][0] = lnbitsize;
-      ld_arg[0][0] = make_bit_field_ref (loc, ll_inner, ll_arg,
-					 lntype, lnbitsize, lnbitpos,
-					 ll_unsignedp || rl_unsignedp,
-					 ll_reversep);
+      ld_arg[0][0] = make_bit_field_load (loc, ll_inner, ll_arg,
+					  lntype, lnbitsize, lnbitpos,
+					  ll_unsignedp || rl_unsignedp,
+					  ll_reversep,
+					  l_mergeable == 0
+					  ? NULL
+					  : l_mergeable < 0
+					  ? ll_load
+					  : rl_load);
     }
 
   if (parts > 1)
     {
       if (l_split_load)
-	build_split_load (ld_arg[0], bitpos[0], bitsiz[0], toshift[0],
-			  shifted[0], loc, ll_inner, ll_arg,
-			  lnmode, lnmode2, lnbitpos, ll_reversep);
+	    {
+	      gimple *point[2];
+	      if (l_mergeable == 0)
+		point[0] = point[1] = NULL;
+	      else if (l_mergeable < 0)
+		{
+		  point[0] = ll_load;
+		  point[1] = rl_load;
+		}
+	      else
+		{
+		  point[0] = rl_load;
+		  point[1] = ll_load;
+		}
+	      build_split_load (ld_arg[0], bitpos[0], bitsiz[0], toshift[0],
+				shifted[0], loc, ll_inner, ll_arg,
+				lnmode, lnmode2, lnbitpos, ll_reversep, point);
+	    }
       else
 	reuse_split_load (ld_arg[0], bitpos[0], bitsiz[0], toshift[0],
 			  shifted[0], xmask[0],
@@ -8141,6 +8324,8 @@ fold_truth_andor_maybe_separate (location_t loc,
 
       for (int j = 0; j < 2; j++)
 	{
+	  op[j] = unshare_expr (op[j]);
+
 	  /* Mask out the bits belonging to the other part.  */
 	  if (xmask[j][i])
 	    mask[j] = int_const_binop (BIT_AND_EXPR, mask[j], xmask[j][i]);
