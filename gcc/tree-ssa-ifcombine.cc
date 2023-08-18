@@ -399,6 +399,14 @@ update_profile_after_ifcombine (basic_block inner_cond_bb,
   outer2->probability = profile_probability::never ();
 }
 
+/* FIXME: move to a header file.  */
+extern tree
+fold_truth_andor_maybe_separate (location_t loc,
+				 enum tree_code code, tree truth_type,
+				 enum tree_code lcode, tree ll_arg, tree lr_arg,
+				 enum tree_code rcode, tree rl_arg, tree rr_arg,
+				 tree *separatep);
+
 /* If-convert on a and pattern with a common else block.  The inner
    if is specified by its INNER_COND_BB, the outer by OUTER_COND_BB.
    inner_inv, outer_inv and result_inv indicate whether the conditions
@@ -573,7 +581,7 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
   else if (TREE_CODE_CLASS (gimple_cond_code (inner_cond)) == tcc_comparison
 	   && TREE_CODE_CLASS (gimple_cond_code (outer_cond)) == tcc_comparison)
     {
-      tree t;
+      tree t, ts = NULL_TREE;
       enum tree_code inner_cond_code = gimple_cond_code (inner_cond);
       enum tree_code outer_cond_code = gimple_cond_code (outer_cond);
 
@@ -596,7 +604,17 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
 					    outer_cond_code,
 					    gimple_cond_lhs (outer_cond),
 					    gimple_cond_rhs (outer_cond),
-					    gimple_bb (outer_cond))))
+					    gimple_bb (outer_cond)))
+	  && !(t = ts = (fold_truth_andor_maybe_separate
+			 (UNKNOWN_LOCATION, TRUTH_ANDIF_EXPR,
+			  boolean_type_node,
+			  outer_cond_code,
+			  gimple_cond_lhs (outer_cond),
+			  gimple_cond_rhs (outer_cond),
+			  inner_cond_code,
+			  gimple_cond_lhs (inner_cond),
+			  gimple_cond_rhs (inner_cond),
+			  NULL))))
 	{
 	  {
 	  tree t1, t2;
@@ -633,7 +651,7 @@ ifcombine_ifandif (basic_block inner_cond_bb, bool inner_inv,
 					  NULL, true, GSI_SAME_STMT);
         }
       /* ??? Fold should avoid this.  */
-      else if (!is_gimple_condexpr_for_cond (t))
+      else if (ts && !is_gimple_condexpr_for_cond (t))
 	goto gimplify_after_fold;
       if (result_inv)
 	t = fold_build1 (TRUTH_NOT_EXPR, TREE_TYPE (t), t);

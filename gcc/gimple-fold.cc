@@ -8420,12 +8420,14 @@ maybe_fold_and_comparisons (tree type,
 						     op2b, outer_cond_bb))
     return t;
 
+#if 0
   if (tree t = fold_truth_andor_maybe_separate (UNKNOWN_LOCATION,
 						TRUTH_ANDIF_EXPR, type,
 						code2, op2a, op2b,
 						code1, op1a, op1b,
 						NULL))
     return t;
+#endif
 
   return NULL_TREE;
 }
